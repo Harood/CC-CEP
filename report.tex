@@ -1,0 +1,385 @@
+%%
+%% CEP Report - Energy-Aware Scheduling of AI Workloads in Kubernetes
+%% Based on Elsevier cas-dc template
+%%
+
+\documentclass[a4paper,fleqn]{cas-dc}
+
+\usepackage[authoryear,longnamesfirst]{natbib}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+
+%%%Author macros
+\def\tsc#1{\csdef{#1}{\textsc{\lowercase{#1}}\xspace}}
+\tsc{WGM}
+\tsc{QE}
+%%%
+
+\begin{document}
+\let\WriteBookmarks\relax
+\def\floatpagepagefraction{1}
+\def\textpagefraction{.001}
+
+% Short title
+\shorttitle{Energy-Aware Scheduling of AI Workloads in Kubernetes}
+
+% Short author
+\shortauthors{Masood and Hassan}
+
+% Main title of the paper
+\title[mode=title]{Energy-Aware Scheduling of AI Workloads in Kubernetes: An Empirical Study on Real Cluster Traces}
+
+% First author
+\author[a]{Haris Masood}
+\cormark[1]
+\fnmark[1]
+\ead{masood4602643@cloud.neduet.edu.pk}
+\credit{Conceptualization, Literature Review, Methodology, Software, Writing - Original Draft}
+\affiliation[a]{organization={Department of Software Engineering, NED University of Engineering \& Technology},
+            addressline={University Road},
+            city={Karachi},
+            postcode={75270},
+            state={Sindh},
+            country={Pakistan}}
+
+\author[a]{M. Huzaifa Hassan}
+\cormark[2]
+\fnmark[2]
+\ead{hassan4602510@cloud.neduet.edu.pk}
+\credit{Literature Review, Methodology, Validation, Writing - Review and Editing}
+
+% Corresponding author text
+\cortext[1]{Corresponding author}
+\cortext[2]{Principal corresponding author}
+
+% Footnote text
+\fntext[1]{These authors contributed equally to this work.}
+\fntext[2]{These authors contributed equally to this work.}
+
+% Abstract
+\begin{abstract}
+The widespread adoption of Kubernetes for large-scale artificial intelligence (AI) and machine learning (ML) workloads has raised critical concerns regarding cluster energy consumption. Standard Kubernetes schedulers place pods based purely on resource requests and availability, ignoring the heterogeneous power profiles of the underlying physical nodes. This study conducts an empirical evaluation of energy-aware scheduling using production workload traces from the Alibaba Platform for AI (PAI) cluster. We model a heterogeneous 16-node CPU/GPU cluster directly derived from Alibaba server specifications, comprising CPU-only, NVIDIA Pascal (P100), Turing (T4), and Volta (V100) nodes. We evaluate five placement policies: a First-Come First-Served (FCFS) First-Fit baseline, the default Kubernetes scoring policy (\emph{LeastAllocated} + \emph{BalancedAllocation}), a power-agnostic bin-packing policy (\emph{MostAllocated}), a proposed energy-aware consolidation policy minimizing marginal dynamic power, and an advanced metadata-aware energy policy incorporating workload type, expected duration, and accelerator affinity. Across 30 paired runs at low, medium, and high cluster loads, the energy-aware policy achieved energy reductions of 6.0\%, 6.2\%, and 9.3\% over default Kubernetes ($p < 0.005$), while the metadata-aware policy yielded savings of 5.8\%, 6.0\%, and 8.8\%. In contrast, power-agnostic bin-packing and naive FCFS increased energy consumption by 6.8\% and 6.9\% at low load by prematurely waking power-hungry nodes. Waiting time was preserved within negligible bounds across all load levels (mean wait differences under 0.3~minutes). Our findings demonstrate that energy reduction requires the deliberate combination of power-aware node ranking, idle node sleep transitions, and accelerator-aware matching rather than unguided consolidation alone.
+\end{abstract}
+
+% Keywords
+\begin{keywords}
+ Kubernetes \sep energy-aware scheduling \sep AI workloads \sep cloud computing \sep GPU clusters \sep Alibaba PAI trace \sep discrete-time simulation
+\end{keywords}
+
+\maketitle
+
+% ============================================================
+\section{Introduction}\label{sec:intro}
+
+\subsection{Background}
+Kubernetes has emerged as the de facto container orchestration framework in cloud computing, inheriting its architectural foundation from Google's Borg and Omega cluster management platforms \citep{burns2016borg}. While originally designed for lightweight, stateless microservices, Kubernetes is now widely deployed to orchestrate computationally demanding artificial intelligence (AI) and deep learning (DL) workflows, including multi-stage data preprocessing, distributed training, hyperparameter search, and real-time model inference \citep{senjab2023survey,weng2022mlaas}. 
+
+Unlike traditional cloud workloads, AI pipelines exhibit distinctive operational characteristics: extreme heterogeneity in hardware demand (mixing multicore CPUs with high-performance GPUs such as NVIDIA P100, T4, and V100 accelerators), substantial variance in job duration (spanning seconds for parameter queries to hours for distributed model training), and volatile resource utilization \citep{weng2022mlaas,gu2025greenflow}. Because deep learning training jobs often execute continuously over extended periods on power-dense hardware, data centers hosting AI clusters draw megawatts of electrical power, making operational energy efficiency critical for economic viability and environmental sustainability.
+
+The placement of pods onto cluster worker nodes is governed by the Kubernetes scheduling subsystem \citep{carrion2022kubernetes}. By default, the kube-scheduler operates as a two-phase framework: a \emph{filtering} phase (predicates) that discards nodes lacking sufficient unreserved CPU, memory, or GPUs, followed by a \emph{scoring} phase (priorities) that ranks feasible nodes using functions such as \emph{LeastAllocated} and \emph{BalancedAllocation}. This default policy intentionally spreads workloads across as many worker nodes as possible to maintain head-room and equalize utilization. However, it was conceived for general-purpose applications without any explicit modeling of node-level power consumption or hardware heterogeneity \citep{senjab2023survey,rejiba2022custom}.
+
+\subsection{Problem Statement}
+Physical servers and GPU accelerators do not exhibit proportional power consumption: an idle or lightly utilized multi-GPU server commonly draws 30\% to 60\% of its peak thermal design power (TDP) simply to remain powered on. Consequently, the default Kubernetes scheduling strategy of dispersing workloads thinly across the fleet causes numerous physical nodes to remain in an active, energy-wasting state \citep{kocot2023energy,rao2025energy}. Workload consolidation onto a compact subset of nodes allows empty servers to enter low-power sleep states, offering substantial energy savings.
+
+However, naive consolidation policies—such as power-agnostic bin-packing (\emph{MostAllocated})—are blind to hardware efficiency differences. In modern heterogeneous clusters containing legacy GPUs, energy-efficient inference cards, and dense accelerator nodes, bin-packing may pack pods onto power-inefficient nodes or wake heavy servers for short-lived tasks, inadvertently increasing total energy consumption \citep{zhong2020cost}. Furthermore, emerging carbon-aware schedulers \citep{gu2025greenflow,piontek2023carbon} frequently rely on live external regional grid telemetry and complex machine-learning predictors that introduce operational fragility. There remains an acute need for a lightweight, transparent, and reproducible scheduling strategy that harnesses cluster hardware metadata and workload characteristics to minimize energy consumption without sacrificing job completion time or requiring external telemetry.
+
+\subsection{Research Objectives}
+This investigation addresses this challenge through the following objectives:
+\begin{enumerate}[(i)]
+    \item Systematically review the state of the art in Kubernetes container scheduling and energy-efficient cloud management, identifying specific limitations when applied to heterogeneous AI workloads;
+    \item Develop and simulate an energy-aware consolidation policy and an extended metadata-aware policy that minimize cluster power draw by leveraging marginal dynamic power scoring, node power-down, and workload metadata; and
+    \item Empirically evaluate the proposed policies against the default Kubernetes scoring policy, power-agnostic bin-packing, and a First-Come First-Served (FCFS) baseline on trace data extracted from Alibaba's production Platform for AI (PAI) GPU cluster across multiple load conditions.
+\end{enumerate}
+
+\subsection{Methodology Overview}
+To evaluate these policies under authentic operating conditions without access to a physical multi-megawatt testbed, we implement a discrete-time simulator modeling a 16-node heterogeneous cluster configured according to Alibaba PAI machine specifications \citep{weng2022mlaas}. Workload traces are extracted from Alibaba's open-source 2-month GPU cluster dataset, selecting a representative 48-hour continuous execution window. Job task instances are translated into individual Kubernetes pods with empirical CPU, memory, and GPU requirements, as well as actual utilization telemetry ($\kappa$ and $\gamma$). Gang scheduling constraints are omitted, reflecting standard Kubernetes pod-by-pod scheduling semantics. Five distinct placement policies are evaluated across 30 independent paired trace replays at low, medium, and high load levels, capturing total energy, node states, GPU utilization, job waiting time, and completion rates.
+
+\subsection{Report Outline}
+Section~\ref{sec:litreview} synthesizes related literature across container scheduling, HPC energy optimization, AI-specific schedulers, and simulation methodologies. Section~\ref{sec:method} presents the empirical trace processing, simulated cluster architecture, power and workload models, scheduling policies, and experimental setup. Section~\ref{sec:results} presents the simulation results, ablation analyses, and sensitivity evaluations. Section~\ref{sec:discussion} discusses operational insights, trade-offs, and threats to validity. Section~\ref{sec:conclusion} concludes the study and outlines future research directions.
+
+% ============================================================
+\section{Literature Review}\label{sec:litreview}
+
+\subsection{Kubernetes Scheduling and Its Limitations}
+The design principles of cloud container orchestration trace their lineage directly to Google's Borg and Omega systems \citep{burns2016borg}, which pioneered declarative state management, priority tiers, and resource-request bin-packing across warehouse-scale computers. In their comprehensive survey, \citet{senjab2023survey} classify Kubernetes scheduling algorithms by the resource dimensions they manage, noting that the built-in scheduler treats CPU and memory requests as static reservations, with energy or power consumption absent from its scoring pipeline. 
+
+\citet{rejiba2022custom} review custom Kubernetes scheduling mechanisms and observe that the standard scheduler cannot accommodate the complex constraints of machine learning and deep learning pipelines, which combine long running durations with specialized hardware dependencies. \citet{carrion2022kubernetes} formulates a taxonomy of Kubernetes scheduling literature structured around Quality-of-Service (QoS) dimensions—differentiating between response latency, utilization balance, and energy conservation—and highlights that energy minimization remains significantly under-investigated compared to latency optimization. Most recently, \citet{elkafhali2026survey} surveys adaptive scheduling techniques in Kubernetes and underscores that while energy-aware and cost-efficient orchestration is gaining momentum, production schedulers continue to prioritize raw resource allocation over operational power efficiency.
+
+\subsection{General Container and Kubernetes Scheduling Techniques}
+A rich body of applied literature has explored algorithmic extensions to cloud schedulers. \citet{ahmad2022container} categorize container placement strategies into mathematical programming, heuristic heuristics, metaheuristics, and reinforcement learning, observing that power models are rarely incorporated into classical formulations. \citet{zhou2021container} investigate container orchestration for high-performance computing (HPC) workflows on Kubernetes, detailing the operational frictions that emerge when batch-style parallel workloads—closely resembling distributed AI training—are mapped onto cloud-native schedulers. 
+
+\citet{zhong2020cost} propose a cost-efficient container placement mechanism in heterogeneous Kubernetes environments, demonstrating that accounting for hardware performance differences substantially reduces total infrastructure expenditure. \citet{santos2023diktyo} introduce Diktyo, an extension incorporating network traffic and bandwidth constraints into pod scoring, illustrating how multi-dimensional resource attributes can be seamlessly integrated into Kubernetes. \citet{lai2023delay} develop a delay-sensitive placement engine for IoT workloads, and \citet{marchese2025loadaware} implement dynamic load-aware orchestration to mitigate performance interference. In a complementary survey, \citet{alqassem2024microservices} analyze resource management frameworks for microservices, reiterating that energy conservation is rarely addressed alongside throughput and latency.
+
+\subsection{Heuristic and Consolidation-Based Energy-Aware Scheduling}
+In high-performance and distributed computing, heuristic consolidation has long served as a primary mechanism for reducing energy waste. \citet{kocot2023energy} survey energy-aware scheduling techniques in HPC architectures, examining dynamic voltage and frequency scaling (DVFS), power capping, and bi-objective trade-offs between execution speed and power draw. Their findings confirm that accepting marginal delays can yield substantial energy savings.
+
+Within the Kubernetes ecosystem specifically, \citet{rao2025energy} formulate an energy-aware scheduler for containerized microservices that models node-level power curves and favors placement decisions that minimize active host counts. \citet{zhang2021zeus} present Zeus, an orchestration architecture for large-scale Kubernetes deployments that enhances energy and resource efficiency by colocating best-effort batch tasks with latency-sensitive services based on observed real-time utilization rather than static reservations. \citet{zuk2022reducing} study function-as-a-service scheduling to minimize tail response latency, while \citet{chen2024optimal} utilize genetic algorithms to solve multi-objective container placement problems across heterogeneous cloud servers.
+
+\subsection{AI- and Deep-Learning-Specific Scheduling}
+The distinctive characteristics of deep learning workloads have spurred specialized scheduling research. \citet{gu2025greenflow} introduce GreenFlow, a carbon-efficient scheduler for deep learning clusters that schedules training workloads based on time-varying grid carbon intensity and job urgency. \citet{mao2021speculative} design a speculative container scheduler for deep learning workloads in Kubernetes, utilizing early-phase iteration speeds to predict job performance and optimize GPU placement. \citet{peng2021dl2} develop DL2, a deep reinforcement learning scheduler that learns placement policies directly from cluster execution logs. \citet{khaledian2024aibased} provide a systematic review of AI-driven workflow scheduling across cloud-fog environments. While effective, these learning-based systems demand extensive offline training traces, complex auxiliary infrastructure, or external telemetry feeds.
+
+\subsection{Carbon-Aware and Energy-Efficiency Approaches}
+A related line of work targets environmental emissions directly. \citet{piontek2023carbon} propose carbon-emission-aware job scheduling for Kubernetes, dynamically shifting batch tasks to periods of low marginal carbon intensity. \citet{saadi2023reducing} evaluate how workflow clustering algorithms influence total energy consumption in cloud clusters, demonstrating that scheduler design alone creates dramatic divergences in energy footprints under identical workload demands. \citet{amahrouch2025optimizing} propose reinforcement-learning-based virtual machine placement to maximize data center energy efficiency, proving that intelligent node selection is a primary determinant of power efficiency.
+
+\subsection{Simulation-Based Evaluation and Trace Datasets}
+Evaluating scheduling policies on live physical clusters at scale presents substantial challenges in cost, reproducibility, and physical instrumentation. Consequently, researchers frequently utilize discrete-event simulation platforms. \citet{wen2023k8ssim} present K8sSim, an extensible simulation tool replicating Kubernetes scheduling behavior, and demonstrate its efficacy in benchmarking custom algorithms against the Kubernetes baseline.
+
+Concurrently, the release of large-scale production traces—most notably Alibaba's Platform for AI (PAI) dataset \citep{weng2022mlaas}—has enabled realistic workload characterization. The Alibaba PAI trace captures over 100,000 deep learning jobs running on thousands of heterogeneous GPUs, recording exact task durations, GPU accelerator types, memory usage, and actual utilization metrics.
+
+\subsection{Synthesis and Research Gap}
+While the reviewed literature confirms that standard Kubernetes scheduling is fundamentally energy-agnostic \citep{senjab2023survey,rejiba2022custom,carrion2022kubernetes,elkafhali2026survey}, existing energy-aware solutions exhibit critical shortcomings: (i) they are typically designed for generic web microservices rather than multi-GPU AI pipelines; (ii) they frequently rely on complex neural network predictors, external carbon feeds, or specialized measurement hardware; or (iii) they evaluate policies on synthetic distributions rather than real-world traces. This study bridges this gap by evaluating lightweight energy-aware and metadata-aware policies using authentic traces and machine profiles from Alibaba's production GPU cluster.
+
+% ============================================================
+\section{Methodology}\label{sec:method}
+
+\subsection{Empirical Workload Trace Extraction}
+Rather than relying solely on synthetic Poisson distributions, this study utilizes real workload data extracted from the Alibaba GPU cluster trace 2020 (\texttt{cluster-trace-gpu-v2020}) from the Platform for AI (PAI) \citep{weng2022mlaas,alibaba2020gputrace}. The raw dataset comprises four core tables: \texttt{job\_sample.csv} (100,516 jobs), \texttt{task\_sample.csv} (121,237 tasks), \texttt{sensor\_by_task.csv} (96,634 telemetry records), and \texttt{machine\_spec.csv} (1,897 physical machines).
+
+\subsubsection{Trace Preprocessing and Pod Translation}
+To extract a coherent workload, we filter terminated jobs and tasks within a continuous 48-hour representative window ($t \in [24, 72]$ hours from trace inception), avoiding initial cluster cold-start artifacts. In the Alibaba trace:
+\begin{itemize}
+    \item CPU requests (\texttt{plan\_cpu}) are recorded in centicores (e.g., 600 centicores = 6.0 physical cores);
+    \item Memory requests (\texttt{plan\_mem}) are specified directly in gigabytes (GB);
+    \item GPU allocations (\texttt{plan\_gpu}) are recorded as percentage of one GPU (e.g., 25 = 0.25 GPU, 100 = 1.0 GPU), reflecting Alibaba PAI's fine-grained GPU sharing architecture;
+    \item Duration is computed from recorded start and completion timestamps ($t_{\mathrm{dur}} = t_{\mathrm{end}} - t_{\mathrm{start}}$ in minutes); and
+    \item Actual utilization ratios ($\kappa \in [0, 1]$ for CPU and $\gamma \in [0, 1]$ for GPU) are computed directly from the sensor table telemetry:
+    \begin{equation}
+    \kappa = \min\left(\frac{\text{cpu\_usage}}{N_{\mathrm{inst}} \times \text{plan\_cpu}}, 1.0\right), \quad
+    \gamma = \min\left(\frac{\text{gpu\_wrk\_util}}{N_{\mathrm{inst}} \times 100}, 1.0\right).
+    \end{equation}
+\end{itemize}
+Each task instance is mapped to an independently schedulable Kubernetes pod. We explicitly note that gang scheduling constraints are omitted, reflecting standard Kubernetes pod-by-pod scheduling semantics. Across the 48-hour evaluation window, the workload encompasses four primary AI pipeline classes: distributed training workers (\texttt{training}, 84.5\%), parameter servers (\texttt{param\_server}, 9.9\%), data preprocessing/ingestion (\texttt{preprocessing}, 5.1\%), and model evaluation (\texttt{evaluation}, 0.6\%).
+
+\subsection{Simulated Cluster Architecture}
+The simulated cluster comprises 16 heterogeneous worker nodes structured directly according to physical machine configurations in Alibaba's \texttt{machine\_spec.csv} (Table~\ref{tbl:nodes}). The cluster provides 1,408 CPU cores, 8,192~GB of RAM, and 40 GPUs across four machine tiers:
+\begin{enumerate}[(1)]
+    \item \textbf{cpu-std} (2 nodes): Pure CPU compute nodes (96 cores, 512~GB RAM, 0 GPU) designed for parameter servers and data preprocessing.
+    \item \textbf{gpu-p100} (4 nodes): Nodes equipped with 2 NVIDIA Pascal P100 GPUs (64 cores, 512~GB RAM), representing legacy accelerator hardware (TDP $\approx 250$\,W per GPU).
+    \item \textbf{gpu-t4} (8 nodes): High-efficiency inference and lightweight training nodes featuring 2 NVIDIA Turing T4 GPUs (96 cores, 512~GB RAM), exhibiting low dynamic power (TDP $\approx 70$\,W per GPU).
+    \item \textbf{gpu-v100} (2 nodes): Dense training hosts equipped with 8 NVIDIA Volta V100 SXM2 GPUs (96 cores, 512~GB RAM), representing high-throughput, high-power accelerator platforms.
+\end{enumerate}
+
+\begin{table*}
+\caption{Simulated node types derived from Alibaba PAI machine specifications. Power values represent established server and accelerator profiles (W per node).}\label{tbl:nodes}
+\begin{tabular*}{\tblwidth}{@{}LLLLLLLLL@{}}
+\toprule
+Type & Count & CPU cores & Memory (GB) & GPUs & $P^{\mathrm{idle}}$ & $P^{\mathrm{cpu}}$ & $P^{\mathrm{gpu}}$ & $P^{\mathrm{sleep}}$ \\
+\midrule
+cpu-std   & 2 & 96 & 512 & 0 & 150 & 250 & 0    & 15 \\
+gpu-p100  & 4 & 64 & 512 & 2 & 250 & 220 & 500  & 20 \\
+gpu-t4    & 8 & 96 & 512 & 2 & 180 & 250 & 140  & 18 \\
+gpu-v100  & 2 & 96 & 512 & 8 & 450 & 250 & 2000 & 35 \\
+\bottomrule
+\end{tabular*}
+\end{table*}
+
+\subsection{Power Model}
+Each physical node $i$ possesses CPU capacity $C_i$, memory capacity $M_i$, and GPU capacity $G_i$. Instantaneous node power draw $P_i(t)$ depends on operational state:
+\begin{equation}
+P_i(t) = \begin{cases}
+P_i^{\mathrm{sleep}}, & \text{if node } i \text{ is sleeping}, \\
+P_i^{\mathrm{idle}}, & \text{if node } i \text{ is waking up}, \\
+P_i^{\mathrm{idle}} + P_i^{\mathrm{cpu}} u_i^{\mathrm{cpu}}(t) + P_i^{\mathrm{gpu}} u_i^{\mathrm{gpu}}(t), & \text{if node } i \text{ is active},
+\end{cases}
+\label{eq:power}
+\end{equation}
+where instantaneous CPU and GPU utilization are computed over the set of active pods $R_i(t)$:
+\begin{equation}
+u_i^{\mathrm{cpu}}(t) = \frac{1}{C_i}\sum_{j\in R_i(t)} c_j\,\kappa_j, \qquad
+u_i^{\mathrm{gpu}}(t) = \frac{1}{G_i}\sum_{j\in R_i(t)} g_j\,\gamma_j.
+\label{eq:util}
+\end{equation}
+Here $c_j$ and $g_j$ are the requested CPU cores and GPU count for pod $j$, and $\kappa_j, \gamma_j \in [0, 1]$ represent empirical sensor utilization fractions. Total electrical energy consumed across the evaluation window $T_{\mathrm{end}} = 54$~hours (48~hours of job arrivals plus a 6-hour drain period) is integrated with time step $\Delta t = 1.0$~minute:
+\begin{equation}
+E = \sum_{t=0}^{T_{\mathrm{end}}}\sum_{i} P_i(t)\,\frac{\Delta t}{60 \times 1000} \quad [\mathrm{kWh}].
+\label{eq:energy}
+\end{equation}
+
+\subsection{Evaluated Scheduling Policies}
+All policies share an identical \emph{filtering} phase: a node is feasible for pod $j$ only if its unallocated CPU, memory, and GPUs satisfy $c_j, m_j, g_j$, and GPU pods ($g_j > 0$) are not placed on zero-GPU nodes. The policies differ fundamentally in how they score and select among feasible nodes:
+
+\begin{enumerate}[(1)]
+\item \textbf{FCFS (First-Fit Baseline).} Pods are assigned to the first feasible active node (lowest node index) without performing multi-dimensional score calculation. If all active nodes are full, the lowest-index sleeping feasible node is woken.
+\item \textbf{Default Kubernetes.} Replicates the standard kube-scheduler priority scoring pipeline. Feasible active nodes are scored by the sum of \emph{LeastAllocated} and \emph{BalancedAllocation}:
+\begin{equation}
+S_{\mathrm{Least}}(i, j) = 1 - \frac{1}{2}\left(\frac{u_i^{\mathrm{alloc,c}} + c_j}{C_i} + \frac{u_i^{\mathrm{alloc,m}} + m_j}{M_i}\right),
+\end{equation}
+\begin{equation}
+S_{\mathrm{Bal}}(i, j) = 1 - \left|\frac{u_i^{\mathrm{alloc,c}} + c_j}{C_i} - \frac{u_i^{\mathrm{alloc,m}} + m_j}{M_i}\right|.
+\end{equation}
+This policy intentionally balances load by favoring the emptiest and most evenly proportioned active node. If no active node fits, an arbitrary feasible sleeping node is woken, mimicking an energy-unaware cluster autoscaler.
+\item \textbf{Bin-packing (MostAllocated).} Implements power-agnostic consolidation:
+\begin{equation}
+S_{\mathrm{Most}}(i, j) = \frac{1}{3}\left(\frac{u_i^{\mathrm{alloc,c}} + c_j}{C_i} + \frac{u_i^{\mathrm{alloc,m}} + m_j}{M_i} + \frac{u_i^{\mathrm{alloc,g}} + g_j}{G_i}\right),
+\end{equation}
+packing pods onto the most heavily loaded active servers to leave remaining nodes empty.
+\item \textbf{Energy-Aware Consolidation (Proposed).} Places pod $j$ on the feasible active node with the minimum marginal dynamic power increase:
+\begin{equation}
+\Delta P_i(j) = P_i^{\mathrm{cpu}}\frac{c_j\kappa_j}{C_i} + P_i^{\mathrm{gpu}}\frac{g_j\gamma_j}{G_i},
+\label{eq:marginal}
+\end{equation}
+breaking ties via \emph{MostAllocated}. When waking a sleeping node is necessary, it wakes the node minimizing total added power: $P_i^{\mathrm{idle}} + \Delta P_i(j)$.
+\item \textbf{Metadata-Aware Energy Policy (Proposed).} Extends the energy-aware heuristic by utilizing workload metadata:
+\begin{itemize}
+    \item \emph{CPU/GPU Workload Separation}: CPU-only pods (\texttt{param\_server}, \texttt{preprocessing}) are strictly steered to \texttt{cpu-std} nodes when available, preventing zero-GPU tasks from keeping 250\,W--450\,W GPU nodes awake.
+    \item \emph{Accelerator Efficiency Matching}: Training pods requesting general GPUs are guided to high-efficiency Turing T4 nodes (70\,W/GPU) over power-dense V100 nodes.
+    \item \emph{Duration-Matched Consolidation}: Pods are co-located with tasks of similar expected runtimes ($| \ln(1 + t_{\mathrm{dur}}) - \ln(1 + \bar{t}_{\mathrm{node}}) |$), reducing tail wakefulness where a single long-running task strands an entire server.
+    \item \emph{Anti-Wakeup Guard}: Waking heavy V100 hosts for ephemeral jobs ($t_{\mathrm{dur}} < 30$~min) is heavily penalized.
+\end{itemize}
+\end{enumerate}
+
+\subsection{Node Power Management and Experimental Design}
+All policies are governed by an identical node power-down mechanism: an active node with zero allocated pods for 10 consecutive minutes enters low-power sleep ($P_i^{\mathrm{sleep}}$). Waking a sleeping node incurs a 2-minute transition delay before pods placed on it can execute, and this delay is incorporated into job waiting times.
+
+To evaluate behavior across varying cluster utilization regimes, workload traces are sampled at three load levels: Low (40 unique jobs, $\sim 120$ pods), Medium (80 unique jobs, $\sim 400$ pods), and High (130 unique jobs, $\sim 550$ pods). Each load configuration is executed across 30 independent random seeds. Under each seed, identical job arrivals are replayed across all five policies, ensuring strictly paired statistical comparisons. Results are reported as mean $\pm$ 95\% confidence half-width via Student's $t$-distribution, with paired $t$-tests evaluating statistical significance. Three ablation experiments probe robustness: (i) disabling node sleep entirely, (ii) enforcing a taint that forbids CPU pods on GPU nodes, and (iii) scaling wake-up delay across 2, 5, and 10 minutes.
+
+% ============================================================
+\section{Results}\label{sec:results}
+
+\subsection{Energy Consumption}
+Table~\ref{tbl:main} and Figures~\ref{fig:energy} and~\ref{fig:saving} present total cluster energy consumption over the 54-hour evaluation window across 30 paired experimental runs.
+
+\begin{table*}
+\caption{Energy consumption and cluster utilization on the Alibaba PAI real dataset (mean $\pm$ 95\% CI over 30 paired runs). Savings are relative to Default K8s; $p$ is from a paired Student's $t$-test.}\label{tbl:main}
+\begin{tabular*}{\tblwidth}{@{}LLLLLLL@{}}
+\toprule
+Load & Scheduler & Energy (kWh) & Saving (\%) & $p$ & Active nodes & GPU util.\ (\%) \\
+\midrule
+\input{tab_main.tex}
+\bottomrule
+\end{tabular*}
+\end{table*}
+
+\begin{figure}
+\centering
+\includegraphics[width=\columnwidth]{figs/fig_energy.pdf}
+\caption{Total cluster energy consumption over 54~hours under the Alibaba PAI workload trace (mean and 95\% CI over 30 paired runs).}\label{fig:energy}
+\end{figure}
+
+\begin{figure}
+\centering
+\includegraphics[width=\columnwidth]{figs/fig_saving.pdf}
+\caption{Percentage energy savings relative to Default Kubernetes across offered load levels (mean and 95\% CI).}\label{fig:saving}
+\end{figure}
+
+Across all evaluated operating points, both the proposed energy-aware policy and the metadata-aware policy achieved statistically significant energy reductions compared to the default Kubernetes scheduler:
+\begin{itemize}
+    \item At \textbf{low load}, the energy-aware policy reduced energy consumption from $44.4 \pm 6.5$\,kWh to $41.7 \pm 6.2$\,kWh ($6.0 \pm 1.8\%$ saving, $p < 0.001$), while the metadata-aware policy achieved $41.8 \pm 6.2$\,kWh ($5.8 \pm 1.9\%$ saving, $p < 0.001$).
+    \item At \textbf{medium load}, energy-aware scheduling reduced total power draw from $69.8 \pm 12.9$\,kWh to $66.3 \pm 14.0$\,kWh ($6.2 \pm 2.9\%$ saving, $p = 0.002$), and metadata-aware scheduling achieved $66.4 \pm 13.9$\,kWh ($6.0 \pm 2.7\%$ saving, $p = 0.002$).
+    \item At \textbf{high load}, the savings expanded to $9.3 \pm 2.2\%$ for energy-aware ($81.1 \pm 7.9$\,kWh vs $89.3 \pm 8.1$\,kWh, $p < 0.001$) and $8.8 \pm 2.1\%$ for metadata-aware scheduling ($81.5 \pm 7.9$\,kWh, $p < 0.001$).
+\end{itemize}
+
+Crucially, power-agnostic bin-packing and naive FCFS placement failed to conserve energy reliably. At low load, bin-packing consumed $47.4 \pm 7.1$\,kWh ($6.8 \pm 2.1\%$ \emph{more} energy than Default K8s, $p < 0.001$), while FCFS consumed $47.5 \pm 7.1$\,kWh ($6.9\%$ more energy). Relative to bin-packing, the proposed energy-aware policy saved 12.1\%, 10.3\%, and 10.4\% energy across low, medium, and high loads. This demonstrates that consolidation without power profile awareness inadvertently wakes and saturates power-inefficient server tiers.
+
+\subsection{Performance Impact and Queueing Dynamics}
+Table~\ref{tbl:perf} and Figure~\ref{fig:nodeswait} report job waiting times, 95th-percentile delays, slowdown ratios, and node wake-up counts.
+
+\begin{table*}
+\caption{Job waiting time, slowdown, and completion metrics under the Alibaba PAI workload (mean over 30 paired runs; mean wait with 95\% CI).}\label{tbl:perf}
+\begin{tabular*}{\tblwidth}{@{}LLLLLLL@{}}
+\toprule
+Load & Scheduler & Mean wait (min) & P95 wait (min) & Slowdown & Wake-ups & Done (\%) \\
+\midrule
+\input{tab_perf.tex}
+\bottomrule
+\end{tabular*}
+\end{table*}
+
+\begin{figure}
+\centering
+\includegraphics[width=\columnwidth]{figs/fig_nodes_wait.pdf}
+\caption{Mean active node count (left) and 95th-percentile waiting time in minutes (right) across Low (L), Medium (M), and High (H) load.}\label{fig:nodeswait}
+\end{figure}
+
+The energy reductions were achieved with negligible impact on job latency:
+\begin{itemize}
+    \item At low load, mean waiting time under energy-aware scheduling was $3.10 \pm 1.52$~minutes compared to $3.14 \pm 1.64$~minutes under Default K8s (a difference of under 3 seconds).
+    \item At medium load, energy-aware and metadata-aware policies achieved mean waiting times of $4.23$~min and $4.24$~min, slightly lower than Default K8s ($4.40 \pm 2.33$~min), with 95th-percentile wait times of 23.4~min vs 26.0~min for Default K8s.
+    \item At high load, mean wait times under energy-aware ($7.51 \pm 4.74$~min) and metadata-aware ($7.53 \pm 4.75$~min) were comparable to Default K8s ($7.79 \pm 4.86$~min), with P95 wait times of 46.3~min and 46.0~min vs 47.8~min for Default K8s.
+\end{itemize}
+Job completion rates exceeded 97.1\% across all configurations, confirming that the consolidation policies did not cause starvation or queue instability.
+
+\subsection{Ablation and Sensitivity Analyses}
+\textbf{Effect of Node Power-Down.} Table~\ref{tbl:ablation} reports cluster energy when sleep states are disabled (all 16 nodes permanently active). Without power-down, cluster idle power alone consumes over $200$\,kWh across 54~hours. In this regime, energy savings fall from $6.0\%$ to $0.7\%$ at low load, from $6.2\%$ to $0.7\%$ at medium load, and from $9.3\%$ to $1.2\%$ at high load. This confirms that consolidation yields major benefits only when unallocated nodes are powered down.
+
+\begin{table*}
+\caption{Ablation evaluation: Effect of node power-down on cluster energy (kWh per 54-hour run; saving relative to Default K8s under same condition).}\label{tbl:ablation}
+\begin{tabular*}{\tblwidth}{@{}LLLLLL@{}}
+\toprule
+Load & Scheduler & Energy (no sleep) & Saving (\%) & Energy (with sleep) & Saving (\%) \\
+\midrule
+\input{tab_ablation.tex}
+\bottomrule
+\end{tabular*}
+\end{table*}
+
+\textbf{Taint Restriction Robustness.} Table~\ref{tbl:taint} examines cluster behavior when a strict Kubernetes taint forbids CPU-only pods on GPU nodes. Under this isolation constraint, energy savings remain robust: $6.0\%$ vs $5.7\%$ at low load, $6.2\%$ vs $6.7\%$ at medium load, and $9.3\%$ vs $7.5\%$ at high load.
+
+\begin{table*}
+\caption{Robustness to CPU-only pod taint restrictions forbidding placement on GPU nodes (energy in kWh; saving vs Default K8s under same condition; wait in minutes).}\label{tbl:taint}
+\begin{tabular*}{\tblwidth}{@{}LLLLLLL@{}}
+\toprule
+Load & Scheduler & Energy (baseline) & Saving (\%) & Energy (taint) & Saving (\%) & Wait (min) \\
+\midrule
+\input{tab_taint.tex}
+\bottomrule
+\end{tabular*}
+\end{table*}
+
+\textbf{Wake-Up Latency Sensitivity.} Table~\ref{tbl:wake} examines sensitivity to node wake-up delays of 2, 5, and 10 minutes at medium load. As wake delay increases, energy savings remain stable ($6.2\%$, $6.1\%$, and $5.3\%$ for energy-aware; $6.0\%$, $5.9\%$, and $5.2\%$ for metadata-aware), while mean waiting times rise predictably ($4.23$, $6.08$, and $9.06$~minutes), closely tracking the wake latency penalty.
+
+\begin{table*}
+\caption{Sensitivity to server wake-up delay at medium load (energy in kWh; saving relative to Default K8s; wait times in minutes).}\label{tbl:wake}
+\begin{tabular*}{\tblwidth}{@{}LLLLLL@{}}
+\toprule
+Wake delay (min) & Scheduler & Energy & Saving (\%) & Mean wait & P95 wait \\
+\midrule
+\input{tab_wake.tex}
+\bottomrule
+\end{tabular*}
+\end{table*}
+
+% ============================================================
+\section{Discussion}\label{sec:discussion}
+
+\subsection{Interpretation of Empirical Findings}
+The empirical results reveal three fundamental dynamics:
+First, \textbf{consolidation without power awareness is counterproductive}. In traditional homogeneous computing, packing pods onto fewer machines consistently saves power. However, in heterogeneous accelerator clusters, power-agnostic bin-packing and naive FCFS placement wake nodes in arbitrary or fixed index order, frequently activating power-dense Volta or Pascal servers to service lightweight or flexible jobs. This resulted in bin-packing consuming 6.8\% more energy than default Kubernetes at low load. Energy reduction requires coupling consolidation with marginal power scoring and power-aware node wake-up.
+
+Second, \textbf{energy savings require sleep states}. The ablation results in Table~\ref{tbl:ablation} demonstrate that marginal power scoring alone achieves modest savings (0.7\% to 1.2\%) when nodes remain permanently powered on. The dominant source of savings arises from permitting idle servers to enter sleep states, allowing the energy-aware policies to harvest up to 9.3\% total cluster energy savings.
+
+Third, \textbf{comparison with synthetic baselines}. In earlier synthetic experiments where jobs were generated via idealized Poisson processes and uniform resource requests, energy savings shrank monotonically from 12.6\% at low load to 1.0\% at high load as the synthetic cluster saturated. On the real Alibaba PAI trace, however, workloads exhibit heavy-tailed job duration distributions and fractional GPU allocations. Consequently, at high load, the energy-aware policy achieved its largest relative saving (9.3\%), because intelligent accelerator selection (steering flexible jobs to high-efficiency T4 nodes instead of Volta nodes) prevented extreme dynamic power spikes under heavy load.
+
+\subsection{Practical Implications for Production Clusters}
+For cloud and Kubernetes operators, these findings provide actionable guidelines:
+\begin{enumerate}[(i)]
+    \item \textbf{Scheduler Extension Integration}: The marginal power scoring function ($\Delta P_i(j)$) requires only basic node power profiles ($P_i^{\mathrm{idle}}, P_i^{\mathrm{cpu}}, P_i^{\mathrm{gpu}}$) exposed as node annotations, making it directly implementable as a lightweight Kubernetes Scheduling Framework plugin \citep{rejiba2022custom} without modifying core Kubernetes binaries.
+    \item \textbf{Autoscaler Alignment}: Cluster autoscalers must be configured with power-aware scale-up prioritization. When waking sleeping nodes, selecting nodes with minimal idle draw and high accelerator efficiency is essential to avoid power overshoot.
+    \item \textbf{Workload Metadata Exploitation}: Annotating pods with workload classification (training vs inference vs parameter server) enables schedulers to prevent zero-GPU tasks from keeping expensive GPU hosts active.
+\end{enumerate}
+
+\subsection{Limitations and Threats to Validity}
+The following limitations should be noted:
+\begin{itemize}
+    \item \textbf{Omission of Gang Scheduling}: In multi-pod distributed training jobs, all task instances frequently must co-start. We scheduled task instances independently as individual pods, reflecting standard Kubernetes pod handling. While common in container simulation studies, gang scheduling could introduce correlated queue delays.
+    \item \textbf{Power Model Linearity}: The power model assumes linear scaling with CPU and GPU utilization. Real-world power curves exhibit non-linear knee points, thermal throttling effects, and memory bus power draw that are not captured in the linear equation.
+    \item \textbf{Performance Interference}: We assumed fixed task durations regardless of co-location density. In production environments, intensive memory bandwidth or PCIe contention between co-located deep learning containers could induce runtime degradation.
+\end{itemize}
+
+% ============================================================
+\section{Conclusion and Future Work}\label{sec:conclusion}
+
+This study evaluated energy-aware scheduling for containerized AI workloads in Kubernetes using authentic production traces and machine profiles from the Alibaba Platform for AI (PAI). Through discrete-time simulation of a 16-node heterogeneous cluster encompassing CPU, P100, T4, and V100 nodes, we evaluated five placement policies across 30 paired trace replays. The proposed energy-aware and metadata-aware policies achieved energy savings of 6.0\%, 6.2\%, and 9.3\% over default Kubernetes at low, medium, and high cluster loads ($p < 0.005$), while outperforming power-agnostic bin-packing by over 10\%. Job waiting times were preserved within negligible margins. Ablation analyses proved that these savings depend strictly on the combination of power-aware node ranking and server power-down mechanisms.
+
+Future work will focus on: (i) compiling the scoring logic into an in-tree Kubernetes Scheduling Framework Go plugin for physical cluster validation; (ii) integrating gang scheduling and all-or-nothing placement semantics for distributed deep learning; (iii) modeling co-location interference on shared GPU memory bandwidth; and (iv) co-optimizing energy-aware placement with carbon-aware temporal load shifting \citep{piontek2023carbon,gu2025greenflow}.
+
+\section*{Data and Code Availability}
+The trace preprocessing pipeline (\texttt{prepare\_trace.py}), cluster simulator (\texttt{simulator.py}), experimental runner (\texttt{run\_experiments.py}), raw simulation records (\texttt{results\_raw.csv}), summary tables, and figure generation scripts are provided in the accompanying replication repository.
+
+% Credits
+\printcredits
+
+\bibliographystyle{cas-model2-names}
+\bibliography{cas-refs}
+
+\end{document}
